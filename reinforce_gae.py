@@ -9,6 +9,7 @@ REINFORCE with GAE 優化版 for LunarLander-v2
 作者：Kevin H. Hsieh (原始版本) / 優化修改版由 ChatGPT 整理
 日期：2025/03/27
 """
+
 import os
 import gym
 from itertools import count
@@ -24,11 +25,15 @@ import torch.optim as optim
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
+# 設定運算設備：若有 GPU 則使用 GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("使用設備：", device)
+
 # 修改：在 SavedAction 中增加 entropy 欄位
 SavedAction = namedtuple('SavedAction', ['log_prob', 'value', 'entropy'])
 
 # 定義三種不同的λ值進行比較
-LAMBDA_VALUES = [0.0, 0.5, 0.99]
+LAMBDA_VALUES = [0.9, 0.95, 0.99]
 
 class Policy(nn.Module):
     """
@@ -45,7 +50,7 @@ class Policy(nn.Module):
         
         # GAE參數
         self.gae_lambda = gae_lambda
-        self.gamma = 0.99
+        self.gamma = 0.995
         
         # 共享特徵提取層
         self.fc1 = nn.Linear(self.observation_dim, self.hidden_size)
@@ -71,7 +76,7 @@ class Policy(nn.Module):
         self.saved_actions = []
         self.rewards = []
         self.dones = []
-        
+    
     def forward(self, state):
         """
         輸入狀態，輸出動作機率分布與狀態價值
@@ -93,7 +98,8 @@ class Policy(nn.Module):
         """
         根據當前狀態選擇動作，並儲存 log_prob, value 與 entropy
         """
-        state = torch.from_numpy(state).float().unsqueeze(0)
+        # 將 state 轉成 tensor 並移至 device
+        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
         action_prob, state_value = self.forward(state)
         m = Categorical(action_prob)
         action = m.sample()
@@ -122,7 +128,7 @@ class Policy(nn.Module):
             delta = rewards[i] + self.gamma * next_value * (1 - dones[i]) - values[i]
             gae = delta + self.gamma * self.gae_lambda * (1 - dones[i]) * gae
             advantages.insert(0, gae)
-        return torch.FloatTensor(advantages)
+        return torch.FloatTensor(advantages).to(device)
     
     def calculate_loss(self):
         """
@@ -136,7 +142,7 @@ class Policy(nn.Module):
         for r, done in zip(reversed(self.rewards), reversed(self.dones)):
             R = 0 if done else r + self.gamma * R
             returns.insert(0, R)
-        returns = torch.FloatTensor(returns)
+        returns = torch.FloatTensor(returns).to(device)
         
         # 優勢標準化處理
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -146,9 +152,9 @@ class Policy(nn.Module):
         state_values = torch.cat([a.value for a in self.saved_actions]).squeeze(-1)
         
         # 策略損失：加入熵正則化 (係數可根據需求調整)
-        policy_loss = -(saved_log_probs * advantages).sum() - 0.01 * saved_entropies.sum()
+        policy_loss = -(saved_log_probs * advantages).sum() - 0.001 * saved_entropies.sum()
         value_loss = F.mse_loss(state_values, returns)
-        loss = policy_loss + 0.5 * value_loss
+        loss = policy_loss + 0.7 * value_loss
         return loss
     
     def clear_memory(self):
@@ -157,11 +163,11 @@ class Policy(nn.Module):
         self.rewards = []
         self.dones = []
 
-def train(lambda_value, lr=0.001, gamma=0.99, batch_size=5):
+def train(lambda_value, lr=0.001, gamma=0.995, batch_size=10):
     """
     使用 GAE 訓練 REINFORCE 模型，並進行批次更新
     """
-    model = Policy(gae_lambda=lambda_value)
+    model = Policy(gae_lambda=lambda_value).to(device)
     model.gamma = gamma
     optimizer = optim.Adam(model.parameters(), lr=lr)
     # 設定學習率調整器，每 200 回合後將學習率乘以 0.95
@@ -236,8 +242,9 @@ def test(model_path, render=True, n_episodes=3):
     """
     測試學習到的模型效能
     """
-    model = Policy()
-    model.load_state_dict(torch.load(model_path))
+    model = Policy().to(device)
+    # 使用 map_location 將模型載入至正確設備
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     
     max_episode_len = 1000
