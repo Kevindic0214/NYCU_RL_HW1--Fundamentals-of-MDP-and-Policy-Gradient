@@ -234,7 +234,7 @@ if __name__ == '__main__':
     # 為了重現性，設定隨機種子
     random_seed = 10  
     lr = 0.01
-    env = gym.make('CartPole-v1')
+    env = gym.make('CartPole-v1', render_mode="rgb_array")
     torch.manual_seed(random_seed)  
     train(lr)
     test(f'CartPole_{lr}.pth')
