@@ -179,7 +179,7 @@ def train(lambda_value, lr=0.001, gamma=0.99):
     writer = SummaryWriter(f"./tb_record_gae_lambda_{lambda_value}")
     
     running_reward = 0
-    log_interval = 10
+    log_interval = 100
     episode_rewards = []
     
     for i_episode in count(1):
@@ -222,8 +222,8 @@ def train(lambda_value, lr=0.001, gamma=0.99):
             torch.save(model.state_dict(), f'./preTrained/LunarLander_lambda_{lambda_value}.pth')
             break
             
-        # 如果超過2000回合仍未解決，結束訓練
-        if i_episode >= 2000:
+        # 如果超過1000回合仍未解決，結束訓練
+        if i_episode >= 1000:
             print(f"達到最大回合數，λ={lambda_value}，最終運行回報為 {running_reward:.2f}")
             if not os.path.isdir("./preTrained"):
                 os.mkdir("./preTrained")
