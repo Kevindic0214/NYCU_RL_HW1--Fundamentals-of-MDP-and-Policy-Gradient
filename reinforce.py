@@ -6,6 +6,8 @@ import gym
 from itertools import count
 from collections import namedtuple
 import numpy as np
+if not hasattr(np, 'bool8'):
+    np.bool8 = np.bool_
 
 import torch
 import torch.nn as nn
@@ -34,19 +36,22 @@ class Policy(nn.Module):
     def __init__(self):
         super(Policy, self).__init__()
         
-        # Extract the dimensionality of state and action spaces
+        # 提取 state 與 action 的維度
         self.discrete = isinstance(env.action_space, gym.spaces.Discrete)
         self.observation_dim = env.observation_space.shape[0]
         self.action_dim = env.action_space.n if self.discrete else env.action_space.shape[0]
         self.hidden_size = 128
-        self.double()
         
-        ########## YOUR CODE HERE (5~10 lines) ##########
-
+        # 定義共用層、動作層與價值層
+        self.fc1 = nn.Linear(self.observation_dim, self.hidden_size)
+        self.action_head = nn.Linear(self.hidden_size, self.action_dim)
+        self.value_head = nn.Linear(self.hidden_size, 1)
+        # 權重初始化 (使用 Xavier 初始化)
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.xavier_uniform_(self.action_head.weight)
+        nn.init.xavier_uniform_(self.value_head.weight)
         
-        ########## END OF YOUR CODE ##########
-        
-        # action & reward memory
+        # 儲存動作與回報的記憶區
         self.saved_actions = []
         self.rewards = []
 
@@ -58,12 +63,10 @@ class Policy(nn.Module):
             TODO:
                 1. Implement the forward pass for both the action and the state value
         """
-        
-        ########## YOUR CODE HERE (3~5 lines) ##########
-
-
-        ########## END OF YOUR CODE ##########
-
+        x = F.relu(self.fc1(state))
+        action_logits = self.action_head(x)
+        action_prob = F.softmax(action_logits, dim=-1)
+        state_value = self.value_head(x)
         return action_prob, state_value
 
 
@@ -75,15 +78,14 @@ class Policy(nn.Module):
             TODO:
                 1. Implement the forward pass for both the action and the state value
         """
+        # 將 state 轉為 tensor，並加入 batch 維度
+        state = torch.from_numpy(state).float().unsqueeze(0)
+        action_prob, state_value = self.forward(state)
+        m = Categorical(action_prob)
+        action = m.sample()
         
-        ########## YOUR CODE HERE (3~5 lines) ##########
-
-
-        ########## END OF YOUR CODE ##########
-        
-        # save to action buffer
+        # 儲存 log_prob 與 state value 到動作記憶中
         self.saved_actions.append(SavedAction(m.log_prob(action), state_value))
-
         return action.item()
 
 
@@ -95,23 +97,30 @@ class Policy(nn.Module):
                 2. Calculate the policy loss using the policy gradient
                 3. Calculate the value loss using either MSE loss or smooth L1 loss
         """
-        
-        # Initialize the lists and variables
         R = 0
         saved_actions = self.saved_actions
         policy_losses = [] 
         value_losses = [] 
         returns = []
 
-        ########## YOUR CODE HERE (8-15 lines) ##########
-
-
-        ########## END OF YOUR CODE ##########
+        # 從後往前計算累積折扣回報
+        for r in self.rewards[::-1]:
+            R = r + gamma * R
+            returns.insert(0, R)
+        returns = torch.tensor(returns, dtype=torch.float)
+        # 選擇性標準化 (可提升學習穩定性)
+        returns = (returns - returns.mean()) / (returns.std() + 1e-9)
         
+        for (log_prob, value), R in zip(saved_actions, returns):
+            advantage = R - value.detach().squeeze(-1)
+            policy_losses.append(-log_prob * advantage)
+            value_losses.append(F.mse_loss(value.squeeze(-1), torch.tensor([R], dtype=torch.float)))
+        
+        loss = torch.stack(policy_losses).sum() + torch.stack(value_losses).sum()
         return loss
 
     def clear_memory(self):
-        # reset rewards and action buffer
+        # 重置 rewards 與動作記憶
         del self.rewards[:]
         del self.saved_actions[:]
 
@@ -119,7 +128,7 @@ class GAE:
     def __init__(self, gamma, lambda_, num_steps):
         self.gamma = gamma
         self.lambda_ = lambda_
-        self.num_steps = num_steps          # set num_steps = None to adapt full batch
+        self.num_steps = num_steps  # 若設定 num_steps = None，則代表全批次計算
 
     def __call__(self, rewards, values, done):
         """
@@ -127,10 +136,17 @@ class GAE:
         TODO (1): Pass correct corresponding inputs (rewards, values, and done) into the function arguments
         TODO (2): Calculate the Generalized Advantage Estimation and return the obtained value
         """
-
-        ########## YOUR CODE HERE (8-15 lines) ##########
-
-        ########## END OF YOUR CODE ##########
+        gae = 0
+        advantages = []
+        for i in reversed(range(len(rewards))):
+            if i == len(rewards) - 1:
+                next_value = 0
+            else:
+                next_value = values[i+1]
+            delta = rewards[i] + self.gamma * next_value - values[i]
+            gae = delta + self.gamma * self.lambda_ * gae
+            advantages.insert(0, gae)
+        return advantages
 
 def train(lr=0.01):
     """
@@ -142,51 +158,49 @@ def train(lr=0.01):
         TODO (2): In each episode, 
         1. record all the value you aim to visualize on tensorboard (lr, reward, length, ...)
     """
-    
-    # Instantiate the policy model and the optimizer
     model = Policy()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
-    # Learning rate scheduler (optional)
-    # scheduler = Scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
-    
-    # EWMA reward for tracking the learning progress
     ewma_reward = 0
     
-    # run inifinitely many episodes
     for i_episode in count(1):
-        # reset environment and episode reward
-        state = env.reset()
+        # 使用新版 Gym 的 reset 方法，取得 state 與 info（info 可忽略）
+        state, _ = env.reset()  
         ep_reward = 0
         t = 0
-
-        # Uncomment the following line to use learning rate scheduler
-        # scheduler.step()
         
-        # For each episode, only run 9999 steps to avoid entering infinite loop during the learning process
-        
-        ########## YOUR CODE HERE (10-15 lines) ##########
-        
-        
-        ########## END OF YOUR CODE ##########
+        # 每個 episode 最多跑 9999 步以避免無限循環
+        while True:
+            action = model.select_action(state)
+            state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated            
+            model.rewards.append(reward)
+            ep_reward += reward
+            t += 1
+            if done:
+                break
             
-        # update EWMA reward and log the results
         ewma_reward = 0.05 * ep_reward + (1 - 0.05) * ewma_reward
         print('Episode {}\tlength: {}\treward: {}\t ewma reward: {}'.format(i_episode, t, ep_reward, ewma_reward))
 
-        #Try to use Tensorboard to record the behavior of your implementation 
-        ########## YOUR CODE HERE (4-5 lines) ##########
+        # 使用 Tensorboard 記錄數值
+        writer.add_scalar('Reward', ep_reward, i_episode)
+        writer.add_scalar('Episode Length', t, i_episode)
+        writer.add_scalar('EWMA Reward', ewma_reward, i_episode)
 
-        ########## END OF YOUR CODE ##########
-
-        # check if we have "solved" the cart pole problem, use 120 as the threshold in LunarLander-v2
+        # 當 EWMA reward 超過環境的 reward_threshold 則儲存模型並結束訓練
         if ewma_reward > env.spec.reward_threshold:
             if not os.path.isdir("./preTrained"):
                 os.mkdir("./preTrained")
             torch.save(model.state_dict(), './preTrained/CartPole_{}.pth'.format(lr))
-            print("Solved! Running reward is now {} and "
-                  "the last episode runs to {} time steps!".format(ewma_reward, t))
+            print("Solved! Running reward is now {} and the last episode runs to {} time steps!".format(ewma_reward, t))
             break
+
+        loss = model.calculate_loss()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        model.clear_memory()
 
 
 def test(name, n_episodes=10):
@@ -201,14 +215,15 @@ def test(name, n_episodes=10):
     max_episode_len = 10000
     
     for i_episode in range(1, n_episodes+1):
-        state = env.reset()
+        state, _ = env.reset()
         running_reward = 0
         for t in range(max_episode_len+1):
             action = model.select_action(state)
-            state, reward, done, _ = env.step(action)
+            state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
             running_reward += reward
             if render:
-                 env.render()
+                env.render()
             if done:
                 break
         print('Episode {}\tReward: {}'.format(i_episode, running_reward))
@@ -216,11 +231,10 @@ def test(name, n_episodes=10):
     
 
 if __name__ == '__main__':
-    # For reproducibility, fix the random seed
+    # 為了重現性，設定隨機種子
     random_seed = 10  
     lr = 0.01
-    env = gym.make('CartPole-v0')
-    env.seed(random_seed)  
+    env = gym.make('CartPole-v1', render_mode="rgb_array")
     torch.manual_seed(random_seed)  
     train(lr)
     test(f'CartPole_{lr}.pth')
