@@ -164,7 +164,7 @@ class Policy(nn.Module):
         self.rewards = []
         self.dones = []
 
-def train(lambda_value, lr=0.001, gamma=0.995, batch_size=10):
+def train(lambda_value, lr=0.001, gamma=0.995, batch_size=10, max_episodes=2000):
     """
     Train REINFORCE model using GAE with batch updates
     """
@@ -229,7 +229,7 @@ def train(lambda_value, lr=0.001, gamma=0.995, batch_size=10):
             torch.save(model.state_dict(), f'./preTrained/LunarLander_lambda_{lambda_value}.pth')
             break
         
-        if i_episode >= 1000:
+        if i_episode >= max_episodes:
             print(f"Maximum episodes reached, λ={lambda_value}, Final running reward: {running_reward:.2f}")
             if not os.path.isdir("./preTrained"):
                 os.mkdir("./preTrained")
@@ -248,7 +248,7 @@ def test(model_path, render=True, n_episodes=3):
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     
-    max_episode_len = 5000
+    max_episode_len = 1000
     total_reward = 0
     
     for i_episode in range(1, n_episodes+1):

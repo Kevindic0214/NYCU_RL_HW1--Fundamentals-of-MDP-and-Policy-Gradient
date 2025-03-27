@@ -1,3 +1,10 @@
+# Spring 2025, 535514 Reinforcement Learning
+# HW1: REINFORCE with baseline
+"""
+REINFORCE with Baseline solving LunarLander-v2
+Author: Kevin H. Heieh
+Date: 2025/03/27
+"""
 import os
 import gym
 from itertools import count
