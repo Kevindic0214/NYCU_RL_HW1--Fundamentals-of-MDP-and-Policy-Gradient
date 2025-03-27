@@ -1,7 +1,7 @@
 # Spring 2025, 535514 Reinforcement Learning
-# HW1: REINFORCE with baseline and GAE
+# HW1: REINFORCE 
 """
-REINFORCE with Baseline solving CartPole-v1
+Vanilla REINFORCE solving CartPole-v1
 Author: Kevin H. Heieh
 Date: 2025/03/25
 """
@@ -21,20 +21,19 @@ from torch.distributions import Categorical
 import torch.optim.lr_scheduler as Scheduler
 from torch.utils.tensorboard import SummaryWriter
 
-# Define a useful tuple (optional)
-SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
+# Define a useful tuple for action log probabilities
+SavedAction = namedtuple('SavedAction', ['log_prob'])
 
 # Define Tensorboard writer
-writer = SummaryWriter("./tb_record_1")
+writer = SummaryWriter("./tb_record_vanilla")
         
 class Policy(nn.Module):
     """
-        Implementing policy network and value network in the same model
-        - Note: here we let the actor network and value network share the first layer
+        Implementing policy network for vanilla REINFORCE
         - You're free to change the architecture (e.g., number of hidden layers and width of each hidden layer)
         - You're free to add any member variables/functions whenever needed
         TODO:
-            1. Initialize the network (including GAE parameters, shared layer, action layer, and value layer)
+            1. Initialize the network (action layer only for vanilla REINFORCE)
             2. Random weight initialization for each layer
     """
     def __init__(self):
@@ -46,32 +45,29 @@ class Policy(nn.Module):
         self.action_dim = env.action_space.n if self.discrete else env.action_space.shape[0]
         self.hidden_size = 64
         
-        # Define shared layer, action layer and value layer
+        # Define policy network layers
         self.fc1 = nn.Linear(self.observation_dim, self.hidden_size)
         self.action_head = nn.Linear(self.hidden_size, self.action_dim)
-        self.value_head = nn.Linear(self.hidden_size, 1)
 
         # Weight initialization (using Xavier initialization)
         nn.init.xavier_uniform_(self.fc1.weight)
         nn.init.xavier_uniform_(self.action_head.weight)
-        nn.init.xavier_uniform_(self.value_head.weight)
         
-        # Memory for storing actions and returns
+        # Memory for storing actions and rewards
         self.saved_actions = []
         self.rewards = []
 
     def forward(self, state):
         """
-            Forward pass of the policy network and value network
-            - Input is the state, output is the corresponding action probability distribution and state value
+            Forward pass of the policy network
+            - Input is the state, output is the corresponding action probability distribution
             TODO:
-                1. Implement forward pass for actions and state values
+                1. Implement forward pass for actions
         """
         x = F.relu(self.fc1(state))
         action_logits = self.action_head(x)
         action_prob = F.softmax(action_logits, dim=-1)
-        state_value = self.value_head(x)
-        return action_prob, state_value
+        return action_prob
 
 
     def select_action(self, state):
@@ -80,31 +76,29 @@ class Policy(nn.Module):
             - Input is the state, output is the action to execute
             (based on the learned stochastic policy)
             TODO:
-                1. Implement forward pass for actions and state values
+                1. Implement action selection based on policy 
         """
         # Convert state to tensor and add batch dimension
         state = torch.from_numpy(state).float().unsqueeze(0)
-        action_prob, state_value = self.forward(state)
+        action_prob = self.forward(state)
         m = Categorical(action_prob)
         action = m.sample()
         
-        # Save log_prob and state value in action memory
-        self.saved_actions.append(SavedAction(m.log_prob(action), state_value))
+        # Save log_prob in action memory
+        self.saved_actions.append(SavedAction(m.log_prob(action)))
         return action.item()
 
 
     def calculate_loss(self, gamma=0.99):
         """
-            Calculate loss (= policy loss + value loss) for backpropagation
+            Calculate loss for vanilla REINFORCE
             TODO:
                 1. Calculate future returns needed for REINFORCE using self.rewards
-                2. Calculate policy loss using policy gradient
-                3. Calculate value loss using MSE or smooth L1 loss
+                2. Calculate policy loss using direct policy gradient
         """
         R = 0
         saved_actions = self.saved_actions
         policy_losses = [] 
-        value_losses = [] 
         returns = []
 
         # Calculate cumulative discounted returns from back to front
@@ -112,15 +106,16 @@ class Policy(nn.Module):
             R = r + gamma * R
             returns.insert(0, R)
         returns = torch.tensor(returns, dtype=torch.float)
+        
         # Optional normalization (can improve learning stability)
         returns = (returns - returns.mean()) / (returns.std() + 1e-9)
         
-        for (log_prob, value), R in zip(saved_actions, returns):
-            advantage = R - value.detach().squeeze(-1)
-            policy_losses.append(-log_prob * advantage)
-            value_losses.append(F.mse_loss(value.squeeze(-1), torch.tensor([R], dtype=torch.float)))
+        # Vanilla REINFORCE: directly use returns to weight policy gradients
+        for log_prob, R in zip(saved_actions, returns):
+            policy_losses.append(-log_prob.log_prob * R)
         
-        loss = torch.stack(policy_losses).sum() + torch.stack(value_losses).sum()
+        # Combine all the losses
+        loss = torch.stack(policy_losses).sum()
         return loss
 
     def clear_memory(self):
@@ -128,36 +123,12 @@ class Policy(nn.Module):
         del self.rewards[:]
         del self.saved_actions[:]
 
-class GAE:
-    def __init__(self, gamma, lambda_, num_steps):
-        self.gamma = gamma
-        self.lambda_ = lambda_
-        self.num_steps = num_steps  # If num_steps = None, it means full batch calculation
-
-    def __call__(self, rewards, values, done):
-        """
-        Implement Generalized Advantage Estimation (GAE) for value prediction
-        TODO (1): Pass the correct corresponding inputs (rewards, values, and done flag) to the function parameters
-        TODO (2): Calculate generalized advantage estimation and return the resulting values
-        """
-        gae = 0
-        advantages = []
-        for i in reversed(range(len(rewards))):
-            if i == len(rewards) - 1:
-                next_value = 0
-            else:
-                next_value = values[i+1]
-            delta = rewards[i] + self.gamma * next_value - values[i]
-            gae = delta + self.gamma * self.lambda_ * gae
-            advantages.insert(0, gae)
-        return advantages
-
 def train(lr=0.01):
     """
         Train the model using SGD (via backpropagation)
         TODO (1): For each episode,
         1. Execute policy until episode termination and save sampled trajectory
-        2. At end of episode, update policy and value networks
+        2. At end of episode, update policy network
 
         TODO (2): For each episode,
         1. Record all the values to be visualized in Tensorboard (learning rate, rewards, length, etc.)
@@ -183,27 +154,31 @@ def train(lr=0.01):
             if done:
                 break
             
+        # Calculate the exponentially weighted moving average reward
         ewma_reward = 0.05 * ep_reward + (1 - 0.05) * ewma_reward
         print('Episode {}\tLength: {}\tReward: {}\tEWMA Reward: {}'.format(i_episode, t, ep_reward, ewma_reward))
 
-        # Record values for Tensorboard
-        writer.add_scalar('Reward', ep_reward, i_episode)
+        # Record values for Tensorboard visualization
+        writer.add_scalar('Reward/Episode', ep_reward, i_episode)
         writer.add_scalar('Episode_Length', t, i_episode)
         writer.add_scalar('EWMA_Reward', ewma_reward, i_episode)
 
-        # Save the model and finish training when reaching reward threshold
-        if ewma_reward > env.spec.reward_threshold:
-            if not os.path.isdir("./preTrained"):
-                os.mkdir("./preTrained")
-            torch.save(model.state_dict(), './preTrained/CartPole_{}.pth'.format(lr))
-            print("Solved! The current running reward is {}, and the last episode runs to {} time steps!".format(ewma_reward, t))
-            break
-
+        # Calculate loss and perform backpropagation
         loss = model.calculate_loss()
+        writer.add_scalar('Loss/Policy', loss.item(), i_episode)
+        
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         model.clear_memory()
+        
+        # Save the model and finish training when reaching reward threshold
+        if ewma_reward > env.spec.reward_threshold:
+            if not os.path.isdir("./preTrained"):
+                os.mkdir("./preTrained")
+            torch.save(model.state_dict(), './preTrained/CartPole_vanilla_{}.pth'.format(lr))
+            print("Solved! The current running reward is {}, and the last episode runs to {} time steps!".format(ewma_reward, t))
+            break
 
 
 def test(name, n_episodes=10):
@@ -240,4 +215,4 @@ if __name__ == '__main__':
     env = gym.make('CartPole-v1', render_mode="rgb_array")
     torch.manual_seed(random_seed)  
     train(lr)
-    test(f'CartPole_{lr}.pth')
+    test(f'CartPole_vanilla_{lr}.pth')
