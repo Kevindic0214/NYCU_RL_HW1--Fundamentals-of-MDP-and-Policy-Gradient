@@ -1,215 +1,286 @@
+import os
+import gym
+from itertools import count
+from collections import namedtuple
 import numpy as np
 if not hasattr(np, 'bool8'):
     np.bool8 = np.bool_
 
-import gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
+import torch.optim.lr_scheduler as Scheduler
 from torch.utils.tensorboard import SummaryWriter
-import itertools
 
-# 檢查 GPU 是否可用
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"使用裝置: {device}")
+# 定義儲存動作資訊的元組，包括對數概率和狀態值
+SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
-# TensorBoard 紀錄路徑的基底資料夾
-base_writer_dir = "./tb_record_lunar_grid"
-
-class PolicyNetwork(nn.Module):
-    def __init__(self, state_dim=8, action_dim=4, hidden_size=128):
-        super().__init__()
-        self.fc1 = nn.Linear(state_dim, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.head = nn.Linear(hidden_size, action_dim)
+# 定義 TensorBoard 記錄器
+writer = SummaryWriter("./tb_record_baseline_optimized")
         
-        # 初始化權重
-        nn.init.xavier_normal_(self.fc1.weight)
-        nn.init.xavier_normal_(self.fc2.weight)
-        nn.init.xavier_normal_(self.head.weight)
+class Policy(nn.Module):
+    """
+    REINFORCE with Baseline 的策略網絡和值網絡實現
+    - 保留部分特徵提取層共享，但後續層分離以減少干擾
+    - 針對複雜的 LunarLander-v2 環境使用更深的網絡結構
+    """
+    def __init__(self, hidden_size=256):
+        super(Policy, self).__init__()
         
-    def forward(self, state):
-        x = torch.relu(self.fc1(state))
-        x = torch.relu(self.fc2(x))
-        return torch.softmax(self.head(x), dim=-1)
+        # 從環境中獲取狀態和動作的維度
+        self.discrete = isinstance(env.action_space, gym.spaces.Discrete)
+        self.observation_dim = env.observation_space.shape[0]  # LunarLander-v2 有 8 個維度
+        self.action_dim = env.action_space.n  # LunarLander-v2 有 4 個維度
+        self.hidden_size = hidden_size  # 增加隱藏層大小以提高網絡表達能力
+        
+        # 共享特徵提取層
+        self.shared_fc = nn.Linear(self.observation_dim, self.hidden_size)
+        
+        # 策略網絡專用層
+        self.policy_fc = nn.Linear(self.hidden_size, self.hidden_size)
+        self.action_head = nn.Linear(self.hidden_size, self.action_dim)
+        
+        # 值網絡專用層 - 作為 baseline 函數
+        self.value_fc = nn.Linear(self.hidden_size, self.hidden_size)
+        self.value_head = nn.Linear(self.hidden_size, 1)
 
-class ValueNetwork(nn.Module):
-    def __init__(self, state_dim=8, hidden_size=128):
-        super().__init__()
-        self.fc1 = nn.Linear(state_dim, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.head = nn.Linear(hidden_size, 1)
+        # 權重初始化（使用 Xavier 初始化以改善深度網絡訓練）
+        nn.init.xavier_uniform_(self.shared_fc.weight)
+        nn.init.xavier_uniform_(self.policy_fc.weight)
+        nn.init.xavier_uniform_(self.value_fc.weight)
+        nn.init.xavier_uniform_(self.action_head.weight)
+        nn.init.xavier_uniform_(self.value_head.weight)
         
-        # 初始化權重
-        nn.init.xavier_normal_(self.fc1.weight)
-        nn.init.xavier_normal_(self.fc2.weight)
-        nn.init.xavier_normal_(self.head.weight)
-        
-    def forward(self, state):
-        x = torch.relu(self.fc1(state))
-        x = torch.relu(self.fc2(x))
-        return self.head(x)
-
-class REINFORCE:
-    def __init__(self, state_dim, action_dim, lr=3e-4, gamma=0.99, entropy_coef=0.01, hidden_size=128):
-        self.policy_net = PolicyNetwork(state_dim, action_dim, hidden_size).to(device)
-        self.value_net = ValueNetwork(state_dim, hidden_size).to(device)
-        self.optimizer = optim.Adam([
-            {'params': self.policy_net.parameters(), 'lr': lr},
-            {'params': self.value_net.parameters(), 'lr': lr}
-        ])
-        self.gamma = gamma
-        self.entropy_coef = entropy_coef  # 熵正則化係數
-        self.saved_log_probs = []
+        # 用於存儲動作和獎勵的記憶體
+        self.saved_actions = []
         self.rewards = []
-        self.entropies = []
-        self.states = []  # 用來儲存狀態序列以供值網路計算
+        self.entropies = []  # 儲存熵用於正則化
+
+    def forward(self, state):
+        """
+        策略網絡和值網絡的前向傳播
+        - 輸入是狀態，輸出是相應的動作概率分佈和狀態值
+        """
+        # 共享特徵提取層
+        shared_features = F.relu(self.shared_fc(state))
         
+        # 策略網絡路徑
+        policy_features = F.relu(self.policy_fc(shared_features))
+        action_logits = self.action_head(policy_features)
+        action_prob = F.softmax(action_logits, dim=-1)
+        
+        # 值網絡路徑（baseline）
+        value_features = F.relu(self.value_fc(shared_features))
+        state_value = self.value_head(value_features)
+        
+        return action_prob, state_value
+
     def select_action(self, state):
-        """根據策略選擇動作"""
-        state = torch.FloatTensor(state).to(device)
-        probs = self.policy_net(state)
-        dist = Categorical(probs)
-        action = dist.sample()
-        self.saved_log_probs.append(dist.log_prob(action))
-        self.entropies.append(dist.entropy())  # 熵值計算用於正則化
+        """
+        根據當前狀態選擇動作
+        - 輸入是狀態，輸出是要執行的動作（基於學習的隨機策略）
+        """
+        # 將狀態轉換為張量並增加批次維度
+        state = torch.from_numpy(state).float().unsqueeze(0)
+        
+        # 獲取動作概率和狀態值
+        action_prob, state_value = self.forward(state)
+        
+        # 創建類別分佈
+        m = Categorical(action_prob)
+        
+        # 從分佈中採樣動作
+        action = m.sample()
+        
+        # 計算熵用於正則化
+        entropy = m.entropy()
+        self.entropies.append(entropy)
+        
+        # 將動作的對數概率和狀態值保存到記憶體
+        self.saved_actions.append(SavedAction(m.log_prob(action), state_value))
+        
         return action.item()
-    
-    def update(self):
-        """更新策略網路與值網路"""
-        returns = []
-        R = 0
-        # 計算折扣報酬
-        for r in reversed(self.rewards):
-            R = r + self.gamma * R
-            returns.insert(0, R)
-        returns = torch.tensor(returns, dtype=torch.float32).to(device)
-        returns = (returns - returns.mean()) / (returns.std() + 1e-9)
-        
-        states_array = np.array(self.states, dtype=np.float32)
-        states = torch.FloatTensor(states_array).to(device)
-        values = self.value_net(states).squeeze()
-        
-        advantages = returns - values.detach()
-        
-        # 策略損失 (含熵正則化)
-        policy_loss = -torch.stack(self.saved_log_probs).to(device) * advantages
-        entropy_loss = -torch.stack(self.entropies).to(device).mean()
-        policy_loss = policy_loss.mean() + self.entropy_coef * entropy_loss
-        
-        # 值網路損失 (MSE)
-        value_loss = F.mse_loss(values, returns)
-        
-        self.optimizer.zero_grad()
-        (policy_loss + value_loss).backward()
-        self.optimizer.step()
-        
-        # 清空暫存資訊
-        self.saved_log_probs = []
-        self.rewards = []
-        self.entropies = []
-        self.states = []
-        return policy_loss.item(), value_loss.item()
 
-def train(env, agent, writer, max_episodes=5000):
+    def calculate_loss(self, gamma=0.99, entropy_coef=0.005):
+        """
+        計算損失（策略損失 + 值損失 + 熵正則化）用於反向傳播
+        - 策略損失使用基準線調整的策略梯度
+        - 值損失使用均方誤差
+        - 熵正則化鼓勵探索
+        """
+        R = 0
+        saved_actions = self.saved_actions
+        policy_losses = [] 
+        value_losses = [] 
+        returns = []
+
+        # 從後向前計算累積折現回報
+        for r in self.rewards[::-1]:
+            R = r + gamma * R
+            returns.insert(0, R)
+            
+        returns = torch.tensor(returns, dtype=torch.float)
+        
+        # 標準化回報（提高訓練穩定性）
+        if len(returns) > 1:  # 確保有多個回報以計算標準差
+            returns = (returns - returns.mean()) / (returns.std() + 1e-9)
+        
+        # 計算策略損失和值損失
+        for i, ((log_prob, value), R) in enumerate(zip(saved_actions, returns)):
+            # 使用狀態值作為基準線，計算優勢
+            advantage = R - value.detach().squeeze(-1)
+            
+            # 策略損失：對數概率乘以優勢
+            policy_losses.append(-log_prob * advantage)
+            
+            # 值損失：預測值與實際回報之間的差異
+            value_losses.append(F.mse_loss(value.squeeze(-1), torch.tensor([R], dtype=torch.float)))
+        
+        # 計算熵正則化損失
+        entropy_loss = -torch.stack(self.entropies).mean()
+        
+        # 結合損失，值損失權重保持在 0.5，增加熵正則化
+        loss = torch.stack(policy_losses).sum() + 0.5 * torch.stack(value_losses).sum() + entropy_coef * entropy_loss
+        
+        return loss
+
+    def clear_memory(self):
+        """
+        清除獎勵和動作記憶體
+        """
+        del self.rewards[:]
+        del self.saved_actions[:]
+        del self.entropies[:]
+
+
+def train(lr=0.0001, gamma=0.99, entropy_coef=0.005, hidden_size=256, update_frequency=1):
     """
-    訓練迴圈，訓練過程中透過 TensorBoard 與 print 保留調適訊息，
-    並回傳本次訓練中的最佳 EWMA 報酬與解算所需回合數（若有解算）。
+    使用 SGD（通過反向傳播）訓練模型
+    - 執行策略直到回合結束，保存採樣的軌跡
+    - 在回合結束時更新策略和值網絡
+    - 在 TensorBoard 上記錄值以進行可視化
     """
+    # 初始化策略模型和優化器
+    model = Policy(hidden_size=hidden_size)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    
+    # 添加學習率調度器以幫助收斂
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=300, gamma=0.9)
+    
+    # 用於追踪學習進度的 EWMA 獎勵
     ewma_reward = 0
-    best_ewma = -float('inf')
-    solved_episode = max_episodes
-    for episode in range(max_episodes):
+    
+    # 批次更新計數器
+    batch_count = 0
+    
+    # 運行訓練回合
+    for i_episode in count(1):
+        # 重置環境和回合獎勵
         state, _ = env.reset()
-        episode_reward = 0
-        states = []
+        ep_reward = 0
+        t = 0
+        
+        # 運行完整回合
         while True:
-            action = agent.select_action(state)
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            agent.rewards.append(reward)
-            states.append(state)
-            episode_reward += reward
-            state = next_state
+            # 選擇動作
+            action = model.select_action(state)
+            
+            # 執行動作
+            state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated            
+            
+            # 保存獎勵
+            model.rewards.append(reward)
+            ep_reward += reward
+            t += 1
+            
+            # 回合結束處理
             if done:
                 break
+            
+        # 更新 EWMA 獎勵和記錄結果
+        ewma_reward = 0.05 * ep_reward + (1 - 0.05) * ewma_reward
+        batch_count += 1
+
+        # 記錄 TensorBoard 值
+        writer.add_scalar('Reward/Episode', ep_reward, i_episode)
+        writer.add_scalar('Episode_Length', t, i_episode)
+        writer.add_scalar('EWMA_Reward', ewma_reward, i_episode)
+        writer.add_scalar('Learning_Rate', scheduler.get_last_lr()[0], i_episode)
+
+        # 每隔 update_frequency 回合更新一次網絡，或者 EWMA 獎勵足夠高時更新
+        if batch_count >= update_frequency or ewma_reward > 200:
+            # 計算損失並更新網絡
+            loss = model.calculate_loss(gamma, entropy_coef)
+            writer.add_scalar('Loss/Total', loss.item(), i_episode)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            model.clear_memory()
+            batch_count = 0
         
-        agent.states = states
-        policy_loss, value_loss = agent.update()
+        # 每 100 個回合打印一次回合信息
+        if i_episode % 100 == 0:
+            print('Episode {}\tLength: {}\tReward: {:.2f}\tEWMA Reward: {:.2f}'.format(
+                i_episode, t, ep_reward, ewma_reward))
         
-        ewma_reward = 0.05 * episode_reward + 0.95 * ewma_reward
-        best_ewma = max(best_ewma, ewma_reward)
-        
-        # 記錄 TensorBoard 訊息
-        writer.add_scalar("Reward/Episode", episode_reward, episode)
-        writer.add_scalar("Reward/EWMA", ewma_reward, episode)
-        writer.add_scalar("Loss/Policy", policy_loss, episode)
-        writer.add_scalar("Loss/Value", value_loss, episode)
-        
-        if episode % 100 == 0:
-            print(f"回合 {episode}, 報酬: {episode_reward:.1f}, EWMA: {ewma_reward:.1f}")
-        
-        # 若 EWMA 報酬達到 200 則認為環境解算，並儲存模型
-        if ewma_reward >= 200:
-            torch.save(agent.policy_net.state_dict(), "./lunar_lander_solved.pth")
-            print(f"在第 {episode} 回合解算完成！")
-            solved_episode = episode
+        # 保存模型並完成訓練，LunarLander-v2 的解決閾值是 200
+        if ewma_reward > 200:
+            if not os.path.isdir("./preTrained"):
+                os.mkdir("./preTrained")
+            torch.save(model.state_dict(), './preTrained/LunarLander_baseline_optimized.pth')
+            print("已解決！運行獎勵為 {:.2f}，最後回合運行了 {} 個時間步！".format(ewma_reward, t))
             break
-    return best_ewma, solved_episode
 
-def grid_search():
-    """
-    利用 Grid Search 自動搜尋最佳超參數組合，
-    並在每個組合中保留訓練調適訊息。
-    """
-    # 定義超參數候選值
-    lr_list = [3e-4, 1e-3]
-    gamma_list = [0.95, 0.99]
-    entropy_coef_list = [0.01, 0.005]
-    hidden_size_list = [128, 256]
-    
-    results = []
-    best_config = None
-    best_reward = -float('inf')
-    
-    total_configs = len(lr_list) * len(gamma_list) * len(entropy_coef_list) * len(hidden_size_list)
-    config_count = 0
-    
-    for lr, gamma, entropy_coef, hidden_size in itertools.product(lr_list, gamma_list, entropy_coef_list, hidden_size_list):
-        config_count += 1
-        print(f"\n開始測試組合 {config_count}/{total_configs}: lr={lr}, gamma={gamma}, entropy_coef={entropy_coef}, hidden_size={hidden_size}")
-        # 為每組超參數建立新的環境與 TensorBoard 記錄器
-        env = gym.make("LunarLander-v2", render_mode="rgb_array")
-        writer = SummaryWriter(f"{base_writer_dir}/lr_{lr}_gamma_{gamma}_entropy_{entropy_coef}_hs_{hidden_size}")
-        agent = REINFORCE(
-            state_dim=env.observation_space.shape[0],
-            action_dim=env.action_space.n,
-            lr=lr,
-            gamma=gamma,
-            entropy_coef=entropy_coef,
-            hidden_size=hidden_size
-        )
-        best_ewma, solved_episode = train(env, agent, writer, max_episodes=5000)
-        print(f"組合 lr={lr}, gamma={gamma}, entropy_coef={entropy_coef}, hidden_size={hidden_size} 最佳 EWMA: {best_ewma:.1f}, 解算回合: {solved_episode}")
-        results.append({
-            "lr": lr,
-            "gamma": gamma,
-            "entropy_coef": entropy_coef,
-            "hidden_size": hidden_size,
-            "best_ewma": best_ewma,
-            "solved_episode": solved_episode
-        })
-        if best_ewma > best_reward:
-            best_reward = best_ewma
-            best_config = (lr, gamma, entropy_coef, hidden_size)
-        env.close()
-        writer.close()
-    
-    print("\n網格搜尋完成！")
-    print(f"最佳參數組合: lr={best_config[0]}, gamma={best_config[1]}, entropy_coef={best_config[2]}, hidden_size={best_config[3]}，最佳 EWMA: {best_reward:.1f}")
-    return results
 
-if __name__ == "__main__":
-    grid_search()
+def test(name, n_episodes=10, hidden_size=256):
+    """
+    測試學習的模型
+    """     
+    model = Policy(hidden_size=hidden_size)
+    
+    model.load_state_dict(torch.load('./preTrained/{}'.format(name)))
+    
+    render = True
+    max_episode_len = 1000
+    
+    for i_episode in range(1, n_episodes+1):
+        state, _ = env.reset()
+        running_reward = 0
+        for t in range(max_episode_len+1):
+            action = model.select_action(state)
+            state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            running_reward += reward
+            if render:
+                env.render()
+            if done:
+                break
+        print('Episode {}\tReward: {:.2f}'.format(i_episode, running_reward))
+    env.close()
+    
+
+if __name__ == '__main__':
+    # 設置隨機種子以確保可重複性
+    random_seed = 10  
+    
+    # 超參數設置
+    lr = 0.0001          # 更低的學習率以穩定訓練
+    gamma = 0.99         # 稍低的折扣因子
+    entropy_coef = 0.005 # 新增的熵正則化係數
+    hidden_size = 256    # 更大的隱藏層大小提高表達能力
+    update_frequency = 1 # 每回合更新，可以設置更高的值以加速訓練
+    
+    # 創建 LunarLander-v2 環境
+    env = gym.make('LunarLander-v2', render_mode="rgb_array")
+    torch.manual_seed(random_seed)  
+    
+    # 訓練模型
+    train(lr, gamma, entropy_coef, hidden_size, update_frequency)
+    
+    # 測試訓練好的模型
+    test('LunarLander_baseline_optimized.pth', hidden_size=hidden_size)
