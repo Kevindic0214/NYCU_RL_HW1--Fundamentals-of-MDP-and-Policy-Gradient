@@ -244,7 +244,7 @@ def train(lr=0.01):
         writer.add_scalar('Episode_Length', t, i_episode)
         writer.add_scalar('EWMA_Reward', ewma_reward, i_episode)
         writer.add_scalar('Episode_Reward', ep_reward, i_episode)
-        writer.add_scalar('Learning_Rate', scheduler.get_last_lr()[-1], i_episode)
+        writer.add_scalar('Learning_Rate', scheduler.get_last_lr()[0], i_episode)
         writer.add_scalar('Loss/Policy', loss.item(), i_episode)
         ########## END OF YOUR CODE ##########
         
