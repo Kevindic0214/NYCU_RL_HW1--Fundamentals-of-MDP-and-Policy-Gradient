@@ -1,304 +1,296 @@
-"""
-REINFORCE with GAE Optimized Version for LunarLander-v2
-Optimizations:
-1. Added entropy regularization to promote exploration
-2. Vectorized loss calculation
-3. Shared feature extraction followed by separate Actor and Critic branches
-4. Accumulated multiple episodes for batch updates
-5. Using learning rate scheduler
-Author: Kevin H. Hsieh
-Date: 2025/03/27
-"""
+# Spring 2023, 535515 Reinforcement Learning
+# HW1: REINFORCE and baseline
 
 import os
 import gym
 from itertools import count
 from collections import namedtuple
 import numpy as np
-if not hasattr(np, 'bool8'):
-    np.bool8 = np.bool_
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
+import torch.optim.lr_scheduler as Scheduler
 from torch.utils.tensorboard import SummaryWriter
 
-# Set computing device: use GPU if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Device used:", device)
+# Define a useful tuple (optional)
+SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
-# Modify: Add entropy field in SavedAction
-SavedAction = namedtuple('SavedAction', ['log_prob', 'value', 'entropy'])
-
-# Define three different lambda values for comparison
-LAMBDA_VALUES = [0.9, 0.95, 0.99]
+# Define a tensorboard writer
+writer = SummaryWriter("./tb_record_1/GAE")
+        
+env = gym.make("LunarLander-v2")
+random_seed = 10 
+env.seed(random_seed)
 
 class Policy(nn.Module):
     """
-    Implementation of a network that contains both Actor and Critic,
-    with shared feature extraction followed by separate hidden layers
+        Implement both policy network and the value network in one model
+        - Note that here we let the actor and value networks share the first layer
+        - Feel free to change the architecture (e.g. number of hidden layers and the width of each hidden layer) as you like
+        - Feel free to add any member variables/functions whenever needed
+        TODO:
+            1. Initialize the network (including the GAE parameters, shared layer(s), the action layer(s), and the value layer(s))
+            2. Random weight initialization of each layer
     """
-    def __init__(self, gae_lambda=0.95):
+    def __init__(self):
         super(Policy, self).__init__()
         
-        # Extract dimensions of state and action (dependent on global variable env)
+        # Extract the dimensionality of state and action spaces
         self.discrete = isinstance(env.action_space, gym.spaces.Discrete)
         self.observation_dim = env.observation_space.shape[0]
         self.action_dim = env.action_space.n if self.discrete else env.action_space.shape[0]
-        self.hidden_size = 128  # Increase hidden layer width to enhance model capacity
+        self.hidden_size = 128
+        self.double()
         
-        # GAE parameters
-        self.gae_lambda = gae_lambda
-        self.gamma = 0.995
+        ########## YOUR CODE HERE (5~10 lines) ##########
+        self.shared_layer1 = nn.Linear(self.observation_dim, self.hidden_size)
+        self.shared_layer2 = nn.Linear(self.hidden_size, self.hidden_size)
+        self.action_layer = nn.Linear(self.hidden_size, self.action_dim)
+        self.value_layer = nn.Linear(self.hidden_size, 1)
+        ########## END OF YOUR CODE ##########
         
-        # Shared feature extraction layers
-        self.fc1 = nn.Linear(self.observation_dim, self.hidden_size)
-        self.fc2 = nn.Linear(self.hidden_size, self.hidden_size)
-        
-        # Actor branch
-        self.actor_hidden = nn.Linear(self.hidden_size, self.hidden_size)
-        self.action_head = nn.Linear(self.hidden_size, self.action_dim)
-        
-        # Critic branch
-        self.critic_hidden = nn.Linear(self.hidden_size, self.hidden_size)
-        self.value_head = nn.Linear(self.hidden_size, 1)
-        
-        # Weight initialization (using Xavier initialization)
-        nn.init.xavier_uniform_(self.fc1.weight)
-        nn.init.xavier_uniform_(self.fc2.weight)
-        nn.init.xavier_uniform_(self.actor_hidden.weight)
-        nn.init.xavier_uniform_(self.action_head.weight)
-        nn.init.xavier_uniform_(self.critic_hidden.weight)
-        nn.init.xavier_uniform_(self.value_head.weight)
-        
-        # Memory to store actions, rewards, and done flags
+        # action & reward memory
         self.saved_actions = []
         self.rewards = []
-        self.dones = []
-    
+
     def forward(self, state):
         """
-        Input state, output action probability distribution and state value
+            Forward pass of both policy and value networks
+            - The input is the state, and the outputs are the corresponding 
+              action probability distirbution and the state value
+            TODO:
+                1. Implement the forward pass for both the action and the state value
         """
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
         
-        # Actor branch
-        actor_x = F.relu(self.actor_hidden(x))
-        action_logits = self.action_head(actor_x)
-        action_prob = F.softmax(action_logits, dim=-1)
-        
-        # Critic branch
-        critic_x = F.relu(self.critic_hidden(x))
-        state_value = self.value_head(critic_x)
+        ########## YOUR CODE HERE (3~5 lines) ##########
+        x = self.shared_layer1(state)
+        x = F.relu(x)
+        x = self.shared_layer2(x)
+        x = F.relu(x)
+        action_prob = self.action_layer(x)
+        state_value = self.value_layer(x)
+        ########## END OF YOUR CODE ##########
+
         return action_prob, state_value
-    
+
+
     def select_action(self, state):
         """
-        Select action based on current state, and store log_prob, value, and entropy
+            Select the action given the current state
+            - The input is the state, and the output is the action to apply 
+            (based on the learned stochastic policy)
+            TODO:
+                1. Implement the forward pass for both the action and the state value
         """
-        # Convert state to tensor and move to device
-        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
-        action_prob, state_value = self.forward(state)
-        m = Categorical(action_prob)
+        
+        ########## YOUR CODE HERE (3~5 lines) ##########
+        state = torch.Tensor(state)
+        action, state_value= self.forward(state)
+        m = Categorical(logits=action)
         action = m.sample()
-        entropy = m.entropy()
+        ########## END OF YOUR CODE ##########
         
-        self.saved_actions.append(SavedAction(m.log_prob(action), state_value, entropy))
-        return action.item()
-    
-    def calculate_gae(self):
-        """
-        Calculate advantages for each step using Generalized Advantage Estimation (GAE)
-        """
-        rewards = np.array(self.rewards)
-        # Extract state values from saved_actions and convert to numpy array
-        values = np.array([action.value.item() for action in self.saved_actions])
-        dones = np.array(self.dones)
-        
-        gae = 0
-        advantages = []
-        # Calculate GAE from back to front
-        for i in reversed(range(len(rewards))):
-            if i == len(rewards) - 1 or dones[i]:
-                next_value = 0
-            else:
-                next_value = values[i+1]
-            delta = rewards[i] + self.gamma * next_value * (1 - dones[i]) - values[i]
-            gae = delta + self.gamma * self.gae_lambda * (1 - dones[i]) * gae
-            advantages.insert(0, gae)
-        return torch.FloatTensor(advantages).to(device)
-    
-    def calculate_loss(self):
-        """
-        Vectorized calculation of policy and value losses, with entropy regularization
-        """
-        advantages = self.calculate_gae()  # shape: [T]
-        
-        # Calculate returns
-        returns = []
-        R = 0
-        for r, done in zip(reversed(self.rewards), reversed(self.dones)):
-            R = 0 if done else r + self.gamma * R
-            returns.insert(0, R)
-        returns = torch.FloatTensor(returns).to(device)
-        
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        saved_log_probs = torch.stack([a.log_prob for a in self.saved_actions])
-        saved_entropies = torch.stack([a.entropy for a in self.saved_actions])
-        state_values = torch.cat([a.value for a in self.saved_actions]).squeeze(-1)
-        
-        # Policy loss with entropy regularization (coefficient can be adjusted as needed)
-        policy_loss = -(saved_log_probs * advantages).sum() - 0.001 * saved_entropies.sum()
-        value_loss = F.mse_loss(state_values, returns)
-        loss = policy_loss + 0.7 * value_loss
-        return loss
-    
-    def clear_memory(self):
-        # Clear accumulated memories
-        self.saved_actions = []
-        self.rewards = []
-        self.dones = []
+        # save to action buffer
+        self.saved_actions.append(SavedAction(m.log_prob(action), state_value))
 
-def train(lambda_value, lr=0.001, gamma=0.995, batch_size=10, max_episodes=2000):
+        return action.item()
+
+
+    def calculate_loss(self, gamma=0.999, lambda_ = 0.99):
+        """
+            Calculate the loss (= policy loss + value loss) to perform backprop later
+            TODO:
+                1. Calculate rewards-to-go required by REINFORCE with the help of self.rewards
+                2. Calculate the policy loss using the policy gradient
+                3. Calculate the value loss using either MSE loss or smooth L1 loss
+        """
+        
+        # Initialize the lists and variables
+        R = 0
+        saved_actions = self.saved_actions
+        policy_losses = [] 
+        value_losses = [] 
+        returns = []
+
+        ########## YOUR CODE HERE (8-15 lines) ##########
+        discounted_sum = 0
+        for reward in reversed(self.rewards):
+            discounted_sum = reward + gamma * discounted_sum
+            returns.append(discounted_sum)
+        returns.reverse()
+        returns = torch.Tensor(returns)
+        returns = (returns - returns.mean()) / (returns.std())
+        returns = returns.detach()
+
+        log_probs = [action.log_prob for action in saved_actions]
+        values = [action.value for action  in saved_actions]
+
+        advantages = GAE(gamma, lambda_, None)(self.rewards, values)
+        advantages = advantages.detach()
+
+        action_log_probs = torch.stack(log_probs, dim=0)
+        values = torch.stack(values, dim=0)[:,0]
+
+        policy_losses = -(advantages * action_log_probs).sum()
+        value_losses = F.mse_loss(values, returns).sum()
+        loss = policy_losses + value_losses
+        ########## END OF YOUR CODE ##########
+        
+        return loss
+
+    def clear_memory(self):
+        # reset rewards and action buffer
+        del self.rewards[:]
+        del self.saved_actions[:]
+
+class GAE:
+    def __init__(self, gamma, lambda_, num_steps):
+        self.gamma = gamma
+        self.lambda_ = lambda_
+        self.num_steps = num_steps          # set num_steps = None to adapt full batch
+
+    def __call__(self, rewards, values, done=False):
+        """
+        Implement Generalized Advantage Estimation (GAE) for your value prediction
+        TODO (1): Pass correct corresponding inputs (rewards, values, and done) into the function arguments
+        TODO (2): Calculate the Generalized Advantage Estimation and return the obtained value
+        """
+        ########## YOUR CODE HERE (8-15 lines) ##########
+        advantages = []
+        advantage = 0
+        next_value = 0
+        t = 0
+        for r, v in zip(reversed(rewards), reversed(values)):
+            t += 1
+            td_error = r + next_value * self.gamma - v
+            advantage = td_error + advantage * self.gamma * self.lambda_
+            next_value = v
+            advantages.insert(0, advantage)
+            if self.num_steps is not None and t > self.num_steps:
+                break
+        advantages = torch.Tensor(advantages)
+        advantages = (advantages - advantages.mean()) / (advantages.std())
+        return advantages
+        ########## END OF YOUR CODE ##########
+
+def train(lr=0.01, lr_decay=0.9, gamma=0.999, lambda_ = 0.999):
     """
-    Train REINFORCE model using GAE with batch updates
+        Train the model using SGD (via backpropagation)
+        TODO (1): In each episode, 
+        1. run the policy till the end of the episode and keep the sampled trajectory
+        2. update both the policy and the value network at the end of episode
+
+        TODO (2): In each episode, 
+        1. record all the value you aim to visualize on tensorboard (lr, reward, length, ...)
     """
-    model = Policy(gae_lambda=lambda_value).to(device)
-    model.gamma = gamma
+    
+    # Instantiate the policy model and the optimizer
+    model = Policy()
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    # Set learning rate scheduler to multiply learning rate by 0.95 every 200 episodes
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=200, gamma=0.95)
     
-    writer = SummaryWriter(f"./tb_record_gae_lambda_{lambda_value}")
+    # Learning rate scheduler (optional)
+    scheduler = Scheduler.StepLR(optimizer, step_size=100, gamma=lr_decay)
     
-    running_reward = 0
-    log_interval = 100
-    episode_rewards = []
+    # EWMA reward for tracking the learning progress
+    ewma_reward = 0
     
-    batch_count = 0  # Count episodes in the current batch
-    
+    # run inifinitely many episodes
     for i_episode in count(1):
-        state, _ = env.reset()
+        # reset environment and episode reward
+        state = env.reset()
         ep_reward = 0
         t = 0
+
+        # Uncomment the following line to use learning rate scheduler
+        # scheduler.step()
         
+        # For each episode, only run 9999 steps to avoid entering infinite loop during the learning process
+        
+        ########## YOUR CODE HERE (10-15 lines) ##########
         while True:
-            action = model.select_action(state)
-            state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            model.rewards.append(reward)
-            model.dones.append(done)
-            ep_reward += reward
             t += 1
+            action = model.select_action(state)
+            state, reward, done, _ = env.step(action)
+            ep_reward += reward
+            model.rewards.append(reward)
             if done:
                 break
         
-        episode_rewards.append(ep_reward)
-        running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward if running_reward else ep_reward
-        
-        writer.add_scalar('Reward', ep_reward, i_episode)
-        writer.add_scalar('Episode Length', t, i_episode)
-        writer.add_scalar('Running Average Reward', running_reward, i_episode)
-        
-        batch_count += 1  # Add one episode
-        
-        if i_episode % log_interval == 0:
-            avg_reward = np.mean(episode_rewards[-log_interval:])
-            print(f'λ={lambda_value}, Episode {i_episode}\tAverage reward: {avg_reward:.2f}\tLength: {t}')
-        
-        # Update model when accumulated batch_size episodes
-        if batch_count == batch_size:
-            loss = model.calculate_loss()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            model.clear_memory()
-            batch_count = 0
-        
-        # Save model and end training when environment is solved
-        if running_reward > env.spec.reward_threshold:
-            print(f"Environment solved! λ={lambda_value}, Running reward: {running_reward:.2f}, Episode {i_episode}")
-            if not os.path.isdir("./preTrained"):
-                os.mkdir("./preTrained")
-            torch.save(model.state_dict(), f'./preTrained/LunarLander_lambda_{lambda_value}.pth')
-            break
-        
-        if i_episode >= max_episodes:
-            print(f"Maximum episodes reached, λ={lambda_value}, Final running reward: {running_reward:.2f}")
-            if not os.path.isdir("./preTrained"):
-                os.mkdir("./preTrained")
-            torch.save(model.state_dict(), f'./preTrained/LunarLander_lambda_{lambda_value}.pth')
-            break
-        
-    writer.close()
-    return running_reward, i_episode
+        optimizer.zero_grad()
+        loss = model.calculate_loss(gamma, lambda_)
+        loss_ = loss.detach()
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
+        model.clear_memory()
+        ########## END OF YOUR CODE ##########
+            
+        # update EWMA reward and log the results
+        ewma_reward = 0.05 * ep_reward + (1 - 0.05) * ewma_reward
+        print('Episode {}\tlength: {}\treward: {}\tloss: {}\t ewma reward: {}'.format(i_episode, t, ep_reward, loss_, ewma_reward))
 
-def test(model_path, render=True, n_episodes=3):
+        #Try to use Tensorboard to record the behavior of your implementation 
+        ########## YOUR CODE HERE (4-5 lines) ##########
+        writer.add_scalar('training loss', loss, i_episode)
+        writer.add_scalar('EWMA reward', ewma_reward, i_episode)
+        writer.add_scalar('Episode rewad', ep_reward, i_episode)
+        writer.add_scalar('Length', t, i_episode)
+        writer.add_scalar('Learning Rate', scheduler.get_lr()[-1], i_episode)
+        ########## END OF YOUR CODE ##########
+
+        # check if we have "solved" the cart pole problem, use 120 as the threshold in LunarLander-v2
+        if ewma_reward > 120:
+            if not os.path.isdir("./preTrained"):
+                os.mkdir("./preTrained")
+            torch.save(model.state_dict(), './preTrained/GAE_LunarLander-v2_{}.pth'.format(lr))
+            print("Solved! Running reward is now {} and "
+                  "the last episode runs to {} time steps!".format(ewma_reward, t))
+            #break
+            return i_episode*(-ewma_reward)
+    return i_episode*(-ewma_reward)
+
+
+def test(name, n_episodes=10):
     """
-    Test the performance of trained model
-    """
-    model = Policy().to(device)
-    # Use map_location to load model to correct device
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
+        Test the learned model (no change needed)
+    """     
+    model = Policy()
     
-    max_episode_len = 1000
-    total_reward = 0
+    model.load_state_dict(torch.load('./preTrained/{}'.format(name)))
+    
+    render = True
+    max_episode_len = 10000
+    R = 0
     
     for i_episode in range(1, n_episodes+1):
-        state, _ = env.reset()
-        ep_reward = 0
+        state = env.reset()
+        running_reward = 0
         for t in range(max_episode_len+1):
             action = model.select_action(state)
-            state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            ep_reward += reward
+            state, reward, done, _ = env.step(action)
+            running_reward += reward
             if render:
-                env.render()
+                 env.render()
             if done:
                 break
-        total_reward += ep_reward
-        print(f'Episode {i_episode}\tReward: {ep_reward:.2f}')
-    
-    avg_reward = total_reward / n_episodes
-    print(f'Average reward: {avg_reward:.2f}')
+        R += running_reward
+        print('Episode {}\tReward: {}'.format(i_episode, running_reward))
+    print('Mean Reward:{}'.format(R/n_episodes))
     env.close()
 
-def compare_lambdas():
-    """
-    Compare the effect of different lambda values in GAE,
-    presenting results in terms of final reward and required episodes
-    """
-    results = {}
-    for lambda_value in LAMBDA_VALUES:
-        print(f"\nStarting training model with λ={lambda_value}...")
-        final_reward, episodes = train(lambda_value)
-        results[lambda_value] = {"reward": final_reward, "episodes": episodes}
-    
-    print("\n===== Comparison of GAE with different λ values =====")
-    print("λ value\tFinal Reward\tTraining Episodes")
-    for lambda_value in LAMBDA_VALUES:
-        print(f"{lambda_value}\t{results[lambda_value]['reward']:.2f}\t{results[lambda_value]['episodes']}")
-    
-    best_lambda = max(results.keys(), key=lambda x: results[x]['reward'])
-    print(f"\nTesting best model with λ={best_lambda}")
-    test(f'./preTrained/LunarLander_lambda_{best_lambda}.pth')
 
 if __name__ == '__main__':
-    # Set random seed for reproducibility
+    # For reproducibility, fix the random seed
     random_seed = 10  
-    torch.manual_seed(random_seed)
-    np.random.seed(random_seed)
-    
-    # Create environment
-    env = gym.make('LunarLander-v2', render_mode="rgb_array")
-    env.reset(seed=random_seed)
-    
-    # Compare different λ values
-    compare_lambdas()
+    lr = 0.002
+    lr_decay = 0.9
+    gamma = 0.999
+    lambda_ = 0.7
+    env = gym.make("LunarLander-v2")
+    env.seed(random_seed)
+    torch.manual_seed(random_seed)  
+    train(lr, lr_decay, gamma, lambda_)
+    test(f'LunarLander-v2_{lr}.pth')
