@@ -19,6 +19,7 @@ import torch.optim as optim
 from torch.distributions import Categorical
 import torch.optim.lr_scheduler as Scheduler
 from torch.utils.tensorboard import SummaryWriter
+import random
 
 # Define a useful tuple for action log probabilities
 SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
@@ -289,7 +290,16 @@ if __name__ == '__main__':
     # For reproducibility, fix the random seed
     random_seed = 10  
     lr = 0.01
+    
+    # Set random seed for reproducibility
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    torch.cuda.manual_seed_all(random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
     env = gym.make('CartPole-v0', render_mode="rgb_array")
-    torch.manual_seed(random_seed)  
+    state, _ = env.reset(seed=random_seed)
     train(lr)
     test(f'CartPole_{lr}.pth')
