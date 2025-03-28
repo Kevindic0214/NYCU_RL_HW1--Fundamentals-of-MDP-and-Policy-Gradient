@@ -25,7 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
 # Define TensorBoard recorder
-writer = SummaryWriter("./tb_record_baseline/second_run")
+writer = SummaryWriter("./tb_record_baseline/")
         
 class Policy(nn.Module):
     """
