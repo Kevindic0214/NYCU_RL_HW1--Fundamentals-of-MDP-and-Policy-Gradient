@@ -25,13 +25,17 @@ from torch.utils.tensorboard import SummaryWriter
 SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
 # Define TensorBoard recorder
-writer = SummaryWriter("./tb_record_baseline")
+writer = SummaryWriter("./tb_record_baseline/second_run")
         
 class Policy(nn.Module):
     """
-    Implementation of policy network and value network for REINFORCE with baseline
-    - Policy network and value network share the first few feature extraction layers
-    - For the more complex LunarLander-v2 environment, a deeper network structure is used
+        Implement both policy network and the value network in one model
+        - Note that here we let the actor and value networks share the first layer
+        - Feel free to change the architecture (e.g. number of hidden layers and the width of each hidden layer) as you like
+        - Feel free to add any member variables/functions whenever needed
+        TODO:
+            1. Initialize the network (including the GAE parameters, shared layer(s), the action layer(s), and the value layer(s))
+            2. Random weight initialization of each layer
     """
     def __init__(self):
         super(Policy, self).__init__()
@@ -42,6 +46,7 @@ class Policy(nn.Module):
         self.action_dim = env.action_space.n  # LunarLander-v2 has 4 dimensions
         self.hidden_size = 256  # Increase hidden layer size to enhance network expressiveness
         
+        ########## YOUR CODE HERE (5~10 lines) ##########
         # Define shared feature extraction layers
         self.fc1 = nn.Linear(self.observation_dim, self.hidden_size)
         self.fc2 = nn.Linear(self.hidden_size, self.hidden_size)
@@ -57,6 +62,7 @@ class Policy(nn.Module):
         nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.xavier_uniform_(self.action_head.weight)
         nn.init.xavier_uniform_(self.value_head.weight)
+        ########## END OF YOUR CODE ##########
         
         # Memory for storing actions and rewards
         self.saved_actions = []
@@ -64,9 +70,13 @@ class Policy(nn.Module):
 
     def forward(self, state):
         """
-        Forward propagation of policy network and value network
-        - Input is state, output is corresponding action probability distribution and state value
+            Forward pass of both policy and value networks
+            - The input is the state, and the outputs are the corresponding 
+              action probability distirbution and the state value
+            TODO:
+                1. Implement the forward pass for both the action and the state value
         """
+        ########## YOUR CODE HERE (3~5 lines) ##########
         # Shared feature extraction layers
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
@@ -77,15 +87,20 @@ class Policy(nn.Module):
         
         # State value calculation (baseline)
         state_value = self.value_head(x)
+        ########## END OF YOUR CODE ##########
         
         return action_prob, state_value
 
 
     def select_action(self, state):
         """
-        Select action based on current state
-        - Input is state, output is action to execute (based on learned stochastic policy)
+            Select the action given the current state
+            - The input is the state, and the output is the action to apply 
+            (based on the learned stochastic policy)
+            TODO:
+                1. Implement the forward pass for both the action and the state value
         """
+        ########## YOUR CODE HERE (3~5 lines) ##########
         # Convert state to tensor and add batch dimension
         state = torch.from_numpy(state).float().unsqueeze(0)
         
@@ -97,18 +112,21 @@ class Policy(nn.Module):
         
         # Sample action from distribution
         action = m.sample()
-        
+        ########## END OF YOUR CODE ##########
+
         # Save action's log probability and state value to action memory
         self.saved_actions.append(SavedAction(m.log_prob(action), state_value))
         
         return action.item()
 
 
-    def calculate_loss(self, gamma=0.99):
+    def calculate_loss(self, gamma=0.9995):
         """
-        Calculate loss (policy loss + value loss) for backpropagation
-        - Policy loss uses policy gradient adjusted by baseline
-        - Value loss uses mean squared error or smooth L1 loss
+            Calculate the loss (= policy loss + value loss) to perform backprop later
+            TODO:
+                1. Calculate rewards-to-go required by REINFORCE with the help of self.rewards
+                2. Calculate the policy loss using the policy gradient
+                3. Calculate the value loss using either MSE loss or smooth L1 loss
         """
         R = 0
         saved_actions = self.saved_actions
@@ -123,6 +141,7 @@ class Policy(nn.Module):
             
         returns = torch.tensor(returns, dtype=torch.float)
         
+        ########## YOUR CODE HERE (8-15 lines) ##########
         # Normalize returns (improves training stability)
         returns = (returns - returns.mean()) / (returns.std() + 1e-9)
         
@@ -139,6 +158,7 @@ class Policy(nn.Module):
         
         # Combine losses, weight of value loss can be adjusted
         loss = torch.stack(policy_losses).sum() + 0.5 * torch.stack(value_losses).sum()
+        ########## END OF YOUR CODE ##########
         
         return loss
 
@@ -150,7 +170,7 @@ class Policy(nn.Module):
         del self.saved_actions[:]
 
 
-def train(lr=0.002, gamma=0.99):
+def train(lr=0.002):
     """
     Train model using SGD (via backpropagation)
     - Execute policy until episode ends, save sampled trajectories
@@ -162,7 +182,7 @@ def train(lr=0.002, gamma=0.99):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
     # Add learning rate scheduler to help convergence
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.95)
     
     # EWMA reward for tracking learning progress
     ewma_reward = 0
@@ -192,6 +212,15 @@ def train(lr=0.002, gamma=0.99):
             if done:
                 break
             
+        # Calculate loss and update network
+        loss = model.calculate_loss()
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
+        model.clear_memory()
+
         # Update EWMA reward and record results
         ewma_reward = 0.05 * ep_reward + (1 - 0.05) * ewma_reward
 
@@ -205,16 +234,9 @@ def train(lr=0.002, gamma=0.99):
         writer.add_scalar('Episode_Length', t, i_episode)
         writer.add_scalar('EWMA_Reward', ewma_reward, i_episode)
         writer.add_scalar('Learning_Rate', scheduler.get_last_lr()[0], i_episode)
-
-        # Calculate loss and update network
-        loss = model.calculate_loss(gamma)
-        writer.add_scalar('Loss/Total', loss.item(), i_episode)
+        writer.add_scalar('Episode_Reward', ep_reward, i_episode)
+        writer.add_scalar('Loss/Policy', loss.item(), i_episode)
         
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-        model.clear_memory()
         
         # Save model and complete training, LunarLander-v2 solving threshold is 200
         if ewma_reward > 200:
@@ -234,7 +256,7 @@ def test(name, n_episodes=10):
     model.load_state_dict(torch.load('./preTrained/{}'.format(name)))
     
     render = True
-    max_episode_len = 1000
+    max_episode_len = 10000
     
     for i_episode in range(1, n_episodes+1):
         state, _ = env.reset()
@@ -255,12 +277,11 @@ def test(name, n_episodes=10):
 if __name__ == '__main__':
     # Set random seed to ensure reproducibility
     random_seed = 10  
-    lr = 0.0001
-    gamma = 0.9995
+    lr = 0.002
     
     # Create LunarLander-v2 environment
     env = gym.make('LunarLander-v2', render_mode="rgb_array")
     torch.manual_seed(random_seed)  
     
-    train(lr, gamma)
+    train(lr)
     test(f'LunarLander_baseline_{lr}.pth')
