@@ -1,9 +1,9 @@
 # Spring 2025, 535514 Reinforcement Learning
-# HW1: REINFORCE 
+# HW1: REINFORCE with baseline
 """
-Vanilla REINFORCE solving CartPole-v1
+REINFORCE with Baseline solving LunarLander-v2
 Author: Kevin H. Heieh
-Date: 2025/03/25
+Date: 2025/03/27
 """
 import os
 import gym
@@ -12,6 +12,7 @@ from collections import namedtuple
 import numpy as np
 if not hasattr(np, 'bool8'):
     np.bool8 = np.bool_
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,11 +21,11 @@ from torch.distributions import Categorical
 import torch.optim.lr_scheduler as Scheduler
 from torch.utils.tensorboard import SummaryWriter
 
-# Define a useful tuple for action log probabilities
+# Tuple for storing action information, including log probability and state value
 SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
-# Define Tensorboard writer
-writer = SummaryWriter("./tb_record_vanilla")
+# Define TensorBoard recorder
+writer = SummaryWriter("./tb_record_baseline/second_run")
         
 class Policy(nn.Module):
     """
@@ -39,27 +40,30 @@ class Policy(nn.Module):
     def __init__(self):
         super(Policy, self).__init__()
         
-        # Extract state and action dimensions
+        # Get the dimensions of state and action from the environment
         self.discrete = isinstance(env.action_space, gym.spaces.Discrete)
-        self.observation_dim = env.observation_space.shape[0]
-        self.action_dim = env.action_space.n if self.discrete else env.action_space.shape[0]
-        self.hidden_size = 128
+        self.observation_dim = env.observation_space.shape[0]  # LunarLander-v2 has 8 dimensions
+        self.action_dim = env.action_space.n  # LunarLander-v2 has 4 dimensions
+        self.hidden_size = 256  # Increase hidden layer size to enhance network expressiveness
         
         ########## YOUR CODE HERE (5~10 lines) ##########
-        # Define policy network layers
+        # Define shared feature extraction layers
         self.fc1 = nn.Linear(self.observation_dim, self.hidden_size)
+        self.fc2 = nn.Linear(self.hidden_size, self.hidden_size)
+        
+        # Define policy network (action output layer)
         self.action_head = nn.Linear(self.hidden_size, self.action_dim)
+        
+        # Define value network (state value output layer) - serves as baseline function
         self.value_head = nn.Linear(self.hidden_size, 1)
 
-        # Weight initialization (using Xavier initialization)
+        # Weight initialization (using Xavier initialization to improve deep network training)
         nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.xavier_uniform_(self.action_head.weight)
         nn.init.xavier_uniform_(self.value_head.weight)
-        
-        # Convert model to double precision
-        self.double()
         ########## END OF YOUR CODE ##########
-
+        
         # Memory for storing actions and rewards
         self.saved_actions = []
         self.rewards = []
@@ -73,16 +77,18 @@ class Policy(nn.Module):
                 1. Implement the forward pass for both the action and the state value
         """
         ########## YOUR CODE HERE (3~5 lines) ##########
+        # Shared feature extraction layers
         x = F.relu(self.fc1(state))
+        x = F.relu(self.fc2(x))
         
         # Action probability calculation
         action_logits = self.action_head(x)
         action_prob = F.softmax(action_logits, dim=-1)
-
-        # State value calculation
+        
+        # State value calculation (baseline)
         state_value = self.value_head(x)
         ########## END OF YOUR CODE ##########
-
+        
         return action_prob, state_value
 
 
@@ -96,23 +102,25 @@ class Policy(nn.Module):
         """
         ########## YOUR CODE HERE (3~5 lines) ##########
         # Convert state to tensor and add batch dimension
-        state = torch.from_numpy(state).double().unsqueeze(0)
-
+        state = torch.from_numpy(state).float().unsqueeze(0)
+        
         # Get action probability and state value
         action_prob, state_value = self.forward(state)
-
-        # Sample an action from the action probability distribution
+        
+        # Create categorical distribution
         m = Categorical(action_prob)
+        
+        # Sample action from distribution
         action = m.sample()
         ########## END OF YOUR CODE ##########
-        
-        # Save log_prob in action memory
-        self.saved_actions.append(SavedAction(m.log_prob(action), state_value))
 
+        # Save action's log probability and state value to action memory
+        self.saved_actions.append(SavedAction(m.log_prob(action), state_value))
+        
         return action.item()
 
 
-    def calculate_loss(self, gamma=0.999):
+    def calculate_loss(self, gamma=0.9995):
         """
             Calculate the loss (= policy loss + value loss) to perform backprop later
             TODO:
@@ -122,145 +130,126 @@ class Policy(nn.Module):
         """
         R = 0
         saved_actions = self.saved_actions
-        policy_losses = []
-        value_losses = []
+        policy_losses = [] 
+        value_losses = [] 
         returns = []
 
         # Calculate cumulative discounted returns from back to front
         for r in self.rewards[::-1]:
             R = r + gamma * R
             returns.insert(0, R)
-        returns = torch.tensor(returns, dtype=torch.double)
+            
+        returns = torch.tensor(returns, dtype=torch.float)
         
         ########## YOUR CODE HERE (8-15 lines) ##########
-        # Normalize the returns
+        # Normalize returns (improves training stability)
         returns = (returns - returns.mean()) / (returns.std() + 1e-9)
         
-        # Vanilla REINFORCE: directly use returns to weight policy gradients
+        # Calculate policy loss and value loss
         for (log_prob, value), R in zip(saved_actions, returns):
-            # Calculate advantage using state value as baseline
-            advantage = R - value.item()
-
+            # Use state value as baseline, calculate advantage
+            advantage = R - value.detach().squeeze(-1)
+            
             # Policy loss: log probability multiplied by advantage
             policy_losses.append(-log_prob * advantage)
-
-            # Value loss: smooth L1 loss
-            value_losses.append(F.smooth_l1_loss(value, torch.tensor([R], dtype=torch.double)))
+            
+            # Value loss: difference between predicted value and actual return
+            value_losses.append(F.mse_loss(value.squeeze(-1), torch.tensor([R], dtype=torch.float)))
         
-        # Combine all the losses
-        loss = torch.stack(policy_losses).sum() + torch.stack(value_losses).sum()
+        # Combine losses, weight of value loss can be adjusted
+        loss = torch.stack(policy_losses).sum() + 0.5 * torch.stack(value_losses).sum()
         ########## END OF YOUR CODE ##########
-
+        
         return loss
 
     def clear_memory(self):
-        # Reset rewards and action memory
+        """
+        Clear rewards and actions memory
+        """
         del self.rewards[:]
         del self.saved_actions[:]
 
-class GAE:
-    def __init__(self, gamma, lambda_, num_steps):
-        self.gamma = gamma
-        self.lambda_ = lambda_
-        self.num_steps = num_steps          # set num_steps = None to adapt full batch
 
-    def __call__(self, rewards, values, done):
-        pass
-        """
-            Implement Generalized Advantage Estimation (GAE) for your value prediction
-            TODO (1): Pass correct corresponding inputs (rewards, values, and done) into the function arguments
-            TODO (2): Calculate the Generalized Advantage Estimation and return the obtained value
-        """
-
-        ########## YOUR CODE HERE (8-15 lines) ##########
-
-
-
-        
-        ########## END OF YOUR CODE ##########
-
-def train(lr=0.01):
+def train(lr=0.002):
     """
-        Train the model using SGD (via backpropagation)
-        TODO (1): In each episode, 
-        1. run the policy till the end of the episode and keep the sampled trajectory
-        2. update both the policy and the value network at the end of episode
-
-        TODO (2): In each episode, 
-        1. record all the value you aim to visualize on tensorboard (lr, reward, length, ...)
+    Train model using SGD (via backpropagation)
+    - Execute policy until episode ends, save sampled trajectories
+    - Update policy and value networks at the end of the episode
+    - Record values for visualization on TensorBoard
     """
+    # Initialize policy model and optimizer
     model = Policy()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
-    # Learning rate scheduler (optional)
-    scheduler = Scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
-
-    # EWMA reward for tracking the learning progress
+    # Add learning rate scheduler to help convergence
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.95)
+    
+    # EWMA reward for tracking learning progress
     ewma_reward = 0
     
-    # Run inifinitely many episodes
+    # Run training episodes
     for i_episode in count(1):
-        # Reset the environment and episode reward
+        # Reset environment and episode reward
         state, _ = env.reset()  
         ep_reward = 0
         t = 0
         
-        # Uncomment the following line to use learning rate scheduler
-        # scheduler.step()
-        
-        # For each episode, only run 9999 steps to avoid entering infinite loop during the learning process
-        
-        ########## YOUR CODE HERE (10-15 lines) ##########
-        # Run at most 9999 steps per episode to avoid infinite loops
+        # Run a complete episode
         while True:
+            # Select action
             action = model.select_action(state)
+            
+            # Execute action
             state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated            
+            
+            # Save reward
             model.rewards.append(reward)
             ep_reward += reward
             t += 1
+            
+            # Episode end handling
             if done:
                 break
-        
-        # Calculate loss and perform backpropagation
+            
+        # Calculate loss and update network
         loss = model.calculate_loss()
         
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         scheduler.step()
-
         model.clear_memory()
-        ########## END OF YOUR CODE ##########
 
-        # Update EWMA reward and log the results
+        # Update EWMA reward and record results
         ewma_reward = 0.05 * ep_reward + (1 - 0.05) * ewma_reward
-        print('Episode {}\tLength: {}\tReward: {}\tEWMA Reward: {}'.format(i_episode, t, ep_reward, ewma_reward))
 
-        #Try to use Tensorboard to record the behavior of your implementation 
-        ########## YOUR CODE HERE (4-5 lines) ##########
-        # Record values for Tensorboard visualization
+        # Print episode information every 100 episodes
+        if i_episode % 100 == 0:
+            print('Episode {}\tLength: {}\tReward: {:.2f}\tEWMA Reward: {:.2f}'.format(
+                i_episode, t, ep_reward, ewma_reward))
+
+        # Record values in TensorBoard
         writer.add_scalar('Reward/Episode', ep_reward, i_episode)
         writer.add_scalar('Episode_Length', t, i_episode)
         writer.add_scalar('EWMA_Reward', ewma_reward, i_episode)
-        writer.add_scalar('Episode_Reward', ep_reward, i_episode)
         writer.add_scalar('Learning_Rate', scheduler.get_last_lr()[0], i_episode)
+        writer.add_scalar('Episode_Reward', ep_reward, i_episode)
         writer.add_scalar('Loss/Policy', loss.item(), i_episode)
-        ########## END OF YOUR CODE ##########
         
-        # Check if we have "solved" the cart pole problem, use 120 as the threshold in LunarLander-v2
-        if ewma_reward > env.spec.reward_threshold:
+        
+        # Save model and complete training, LunarLander-v2 solving threshold is 200
+        if ewma_reward > 200:
             if not os.path.isdir("./preTrained"):
                 os.mkdir("./preTrained")
-            torch.save(model.state_dict(), './preTrained/CartPole_{}.pth'.format(lr))
-            print("Solved! Running reward is now {} and "
-                  "the last episode runs to {} time steps!".format(ewma_reward, t))
+            torch.save(model.state_dict(), './preTrained/LunarLander_baseline_{}.pth'.format(lr))
+            print("Solved! Running reward is {:.2f}, and the last episode ran {} timesteps!".format(ewma_reward, t))
             break
 
 
 def test(name, n_episodes=10):
     """
-        Test the learned model (no changes needed)
+    Test the learned model
     """     
     model = Policy()
     
@@ -281,15 +270,18 @@ def test(name, n_episodes=10):
                 env.render()
             if done:
                 break
-        print('Episode {}\tReward: {}'.format(i_episode, running_reward))
+        print('Episode {}\tReward: {:.2f}'.format(i_episode, running_reward))
     env.close()
     
 
 if __name__ == '__main__':
-    # For reproducibility, fix the random seed
+    # Set random seed to ensure reproducibility
     random_seed = 10  
-    lr = 0.01
-    env = gym.make('CartPole-v0', render_mode="rgb_array")
+    lr = 0.002
+    
+    # Create LunarLander-v2 environment
+    env = gym.make('LunarLander-v2', render_mode="rgb_array")
     torch.manual_seed(random_seed)  
+    
     train(lr)
-    test(f'CartPole_{lr}.pth')
+    test(f'LunarLander_baseline_{lr}.pth')
