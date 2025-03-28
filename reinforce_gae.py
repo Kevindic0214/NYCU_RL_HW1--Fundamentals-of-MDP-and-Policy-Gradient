@@ -298,6 +298,7 @@ if __name__ == '__main__':
     
     # Create environment
     env = gym.make('LunarLander-v2', render_mode="rgb_array")
+    env.reset(seed=random_seed)
     
     # Compare different λ values
     compare_lambdas()
