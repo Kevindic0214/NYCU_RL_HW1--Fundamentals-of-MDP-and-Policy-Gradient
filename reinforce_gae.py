@@ -53,6 +53,7 @@ class Policy(nn.Module):
             2. Random weight initialization of each layer
     """
     def __init__(self):
+    def __init__(self):
         super(Policy, self).__init__()
         
         # Extract state and action dimensions
@@ -369,7 +370,9 @@ def test(name, n_episodes=10):
             state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             running_reward += reward
+            running_reward += reward
             if render:
+                 env.render()
                  env.render()
             if done:
                 break
@@ -378,6 +381,7 @@ def test(name, n_episodes=10):
     
 
 if __name__ == '__main__':
+    # For reproducibility, fix the random seed
     # For reproducibility, fix the random seed
     random_seed = 10  
     
