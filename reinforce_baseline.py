@@ -12,7 +12,7 @@ from collections import namedtuple
 import numpy as np
 if not hasattr(np, 'bool8'):
     np.bool8 = np.bool_
-
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -273,10 +273,17 @@ if __name__ == '__main__':
     random_seed = 10  
     lr = 0.002
     
+    # Set random seed for reproducibility
+    torch.manual_seed(random_seed)
+    torch.cuda.manual_seed_all(random_seed)
+    np.random.seed(random_seed)
+    random.seed(random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
     # Create LunarLander-v2 environment
     env = gym.make('LunarLander-v2', render_mode="rgb_array")
-    torch.manual_seed(random_seed)
-    env.reset(seed=random_seed)
+    state, _ = env.reset(seed=random_seed)
     
     train(lr)
     test(f'LunarLander_baseline_{lr}.pth')
