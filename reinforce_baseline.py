@@ -91,7 +91,6 @@ class Policy(nn.Module):
         
         return action_prob, state_value
 
-
     def select_action(self, state):
         """
             Select the action given the current state
@@ -118,7 +117,6 @@ class Policy(nn.Module):
         self.saved_actions.append(SavedAction(m.log_prob(action), state_value))
         
         return action.item()
-
 
     def calculate_loss(self, gamma=0.9995):
         """
@@ -168,7 +166,6 @@ class Policy(nn.Module):
         """
         del self.rewards[:]
         del self.saved_actions[:]
-
 
 def train(lr=0.002):
     """
@@ -237,7 +234,6 @@ def train(lr=0.002):
         writer.add_scalar('Episode_Reward', ep_reward, i_episode)
         writer.add_scalar('Loss/Policy', loss.item(), i_episode)
         
-        
         # Save model and complete training, LunarLander-v2 solving threshold is 200
         if ewma_reward > 200:
             if not os.path.isdir("./preTrained"):
@@ -245,7 +241,6 @@ def train(lr=0.002):
             torch.save(model.state_dict(), './preTrained/LunarLander_baseline_{}.pth'.format(lr))
             print("Solved! Running reward is {:.2f}, and the last episode ran {} timesteps!".format(ewma_reward, t))
             break
-
 
 def test(name, n_episodes=10):
     """
@@ -272,7 +267,6 @@ def test(name, n_episodes=10):
                 break
         print('Episode {}\tReward: {:.2f}'.format(i_episode, running_reward))
     env.close()
-    
 
 if __name__ == '__main__':
     # Set random seed to ensure reproducibility
@@ -281,7 +275,8 @@ if __name__ == '__main__':
     
     # Create LunarLander-v2 environment
     env = gym.make('LunarLander-v2', render_mode="rgb_array")
-    torch.manual_seed(random_seed)  
+    torch.manual_seed(random_seed)
+    env.reset(seed=random_seed)
     
     train(lr)
     test(f'LunarLander_baseline_{lr}.pth')
