@@ -284,7 +284,28 @@ def test(name, n_episodes=10):
                 break
         print('Episode {}\tReward: {}'.format(i_episode, running_reward))
     env.close()
-    
+
+def test_visualize(model_name, n_episodes=10):
+    # 建立 CartPole 環境，並以 human 模式顯示畫面
+    env = gym.make('CartPole-v0', render_mode="human")
+    model = Policy()
+    model.load_state_dict(torch.load('./preTrained/{}'.format(model_name)))
+    model.eval()
+
+    max_episode_len = 10000
+
+    for i_episode in range(1, n_episodes+1):
+        state, _ = env.reset()
+        running_reward = 0
+        while True:
+            action = model.select_action(state)
+            state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            running_reward += reward
+            if done:
+                break
+        print('Episode {}\tReward: {}'.format(i_episode, running_reward))
+    env.close()
 
 if __name__ == '__main__':
     # For reproducibility, fix the random seed
@@ -301,5 +322,7 @@ if __name__ == '__main__':
     
     env = gym.make('CartPole-v0', render_mode="rgb_array")
     state, _ = env.reset(seed=random_seed)
-    train(lr)
-    test(f'CartPole_{lr}.pth')
+    # train(lr)
+    # test(f'CartPole_{lr}.pth')
+
+    test_visualize('CartPole_0.01.pth', n_episodes=10)

@@ -246,7 +246,7 @@ def test(model_path, num_episodes=10, render=True):
 
 if __name__ == "__main__":
     # Choose mode: "train" or "test"
-    mode = "train"
+    mode = "test"
     
     if mode == "train":
         # Use the latest hyperparameter combination
@@ -287,5 +287,5 @@ if __name__ == "__main__":
     
     elif mode == "test":
         # Test trained model
-        model_path = "./lunar_lander_solved.pth"
+        model_path = "./preTrained/lunar_lander_solved.pth"
         test(model_path, num_episodes=10, render=True)

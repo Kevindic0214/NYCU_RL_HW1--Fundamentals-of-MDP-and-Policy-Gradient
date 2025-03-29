@@ -381,7 +381,6 @@ def test(name, n_episodes=10):
 
 if __name__ == '__main__':
     # For reproducibility, fix the random seed
-    # For reproducibility, fix the random seed
     random_seed = 10  
     
     # Set up environment - LunarLander instead of CartPole
