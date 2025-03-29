@@ -53,7 +53,6 @@ class Policy(nn.Module):
             2. Random weight initialization of each layer
     """
     def __init__(self):
-    def __init__(self):
         super(Policy, self).__init__()
         
         # Extract state and action dimensions
